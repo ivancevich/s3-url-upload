@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/rlmcpherson/s3gof3r"
 )
@@ -50,18 +51,28 @@ type download struct {
 	Error error
 }
 
+type Result struct {
+	URL   string
+	Error error
+}
+
 type S3UrlUpload struct {
 	config *Config
 	bucket *s3gof3r.Bucket
 }
 
-func (s3uu *S3UrlUpload) Run(files ...string) []error {
+func (s3uu *S3UrlUpload) Run(files ...string) <-chan Result {
 	count := len(files)
 	jobs := make(chan string, count)
-	results := make(chan error, count)
+	results := make(chan Result, count)
 
-	for w := 1; w <= int(s3uu.config.Workers); w++ {
-		go s3uu.worker(jobs, results)
+	workers := int(s3uu.config.Workers)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for w := 1; w <= workers; w++ {
+		go s3uu.worker(jobs, results, &wg)
 	}
 
 	for _, f := range files {
@@ -70,16 +81,12 @@ func (s3uu *S3UrlUpload) Run(files ...string) []error {
 
 	close(jobs)
 
-	errors := []error{}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-	for i := 0; i < count; i++ {
-		err := <-results
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-
-	return errors
+	return results
 }
 
 func (s3uu *S3UrlUpload) download(url string) <-chan download {
@@ -111,7 +118,7 @@ func (s3uu *S3UrlUpload) download(url string) <-chan download {
 	return out
 }
 
-func (s3uu *S3UrlUpload) upload(in <-chan download) <-chan error {
+func (s3uu *S3UrlUpload) upload(in <-chan download) <-chan Result {
 	var doUpload = func(d download) error {
 		defer d.Body.Close()
 
@@ -130,24 +137,29 @@ func (s3uu *S3UrlUpload) upload(in <-chan download) <-chan error {
 		return nil
 	}
 
-	out := make(chan error)
+	out := make(chan Result)
 	go func() {
 		defer close(out)
 		for d := range in {
+			result := Result{URL: d.URL}
+
 			if d.Error != nil {
-				out <- d.Error
+				result.Error = d.Error
+				out <- result
 				continue
 			}
 
-			out <- doUpload(d)
+			result.Error = doUpload(d)
+			out <- result
 		}
 	}()
 	return out
 }
 
-func (s3uu *S3UrlUpload) worker(jobs <-chan string, results chan<- error) {
+func (s3uu *S3UrlUpload) worker(jobs <-chan string, results chan<- Result, wg *sync.WaitGroup) {
 	for j := range jobs {
-		err := <-s3uu.upload(s3uu.download(j))
-		results <- err
+		result := <-s3uu.upload(s3uu.download(j))
+		results <- result
 	}
+	wg.Done()
 }
