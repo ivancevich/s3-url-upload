@@ -1,5 +1,5 @@
 # s3-url-upload
-Upload files to S3 from URLs in Golang
+Concurrently upload files to S3 from URLs using Golang
 
 ## Start using it
 
